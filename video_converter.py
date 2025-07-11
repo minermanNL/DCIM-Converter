@@ -2,6 +2,11 @@
 """
 Video Converter for iPhone Compatibility
 Converts video files in DCIM folder to iPhone-compatible formats
+
+Open Source Video Converter
+Version: 1.0.0
+License: MIT
+GitHub: https://github.com/minermanNL/DCIM-Converter
 """
 
 import os
@@ -14,12 +19,22 @@ import json
 from pathlib import Path
 from datetime import datetime
 import queue
+import configparser
+import webbrowser
+
+# Application constants
+APP_NAME = "Video Converter for iPhone"
+APP_VERSION = "1.0.0"
+APP_AUTHOR = "Open Source Community"
+APP_LICENSE = "MIT"
+APP_GITHUB = "https://github.com/minermanNL/DCIM-Converter"
 
 class VideoConverter:
     def __init__(self, root):
         self.root = root
-        self.root.title("Video Converter for iPhone")
-        self.root.geometry("800x600")
+        self.root.title(f"{APP_NAME} v{APP_VERSION}")
+        self.root.geometry("900x700")
+        self.root.minsize(800, 600)
         
         # Queue for thread communication
         self.log_queue = queue.Queue()
@@ -29,19 +44,36 @@ class VideoConverter:
         self.output_folder = tk.StringVar()
         self.video_files = []
         self.is_converting = False
+        self.is_scanning = False
         self.conversion_thread = None
+        self.scanning_thread = None
         
-        # Set default paths
-        self.source_folder.set(os.path.join(os.path.expanduser("~"), "OneDrive", "Pictures", "DCIM"))
-        self.output_folder.set(os.path.join(os.path.expanduser("~"), "Desktop", "Converted_Videos"))
+        # UI State variables
+        self.show_logs = tk.BooleanVar(value=False)
+        self.logs_frame = None
+        
+        # Load settings
+        self.load_settings()
+        
+        # Set default paths if not loaded from settings
+        if not self.source_folder.get():
+            self.source_folder.set(os.path.join(os.path.expanduser("~"), "OneDrive", "Pictures", "DCIM"))
+        if not self.output_folder.get():
+            self.output_folder.set(os.path.join(os.path.expanduser("~"), "Desktop", "Converted_Videos"))
         
         self.setup_ui()
         self.check_ffmpeg()
         
+        # Save settings on close
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
     def setup_ui(self):
         """Setup the user interface"""
+        # Configure styles
+        self.setup_styles()
+        
         # Main frame
-        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame = ttk.Frame(self.root, padding="15")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Configure grid weights
@@ -49,10 +81,24 @@ class VideoConverter:
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
         
+        # Header frame with title and menu
+        header_frame = ttk.Frame(main_frame)
+        header_frame.grid(row=0, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 20))
+        header_frame.columnconfigure(0, weight=1)
+        
         # Title
-        title_label = ttk.Label(main_frame, text="Video Converter for iPhone", 
-                               font=("Arial", 16, "bold"))
-        title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+        title_label = ttk.Label(header_frame, text=f"{APP_NAME} v{APP_VERSION}", 
+                               font=("Segoe UI", 18, "bold"), style="Title.TLabel")
+        title_label.grid(row=0, column=0, sticky=tk.W)
+        
+        # Menu buttons
+        menu_frame = ttk.Frame(header_frame)
+        menu_frame.grid(row=0, column=1, sticky=tk.E)
+        
+        ttk.Button(menu_frame, text="Settings", command=self.show_settings, 
+                  style="Small.TButton").grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(menu_frame, text="About", command=self.show_about, 
+                  style="Small.TButton").grid(row=0, column=1)
         
         # Source folder selection
         ttk.Label(main_frame, text="Source Folder:").grid(row=1, column=0, sticky=tk.W, pady=5)
@@ -64,8 +110,24 @@ class VideoConverter:
         ttk.Entry(main_frame, textvariable=self.output_folder, width=50).grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5, padx=(5, 5))
         ttk.Button(main_frame, text="Browse", command=self.browse_output).grid(row=2, column=2, pady=5)
         
-        # Scan button
-        ttk.Button(main_frame, text="Scan for Videos", command=self.scan_videos).grid(row=3, column=0, columnspan=3, pady=20)
+        # Scan controls frame
+        scan_frame = ttk.Frame(main_frame)
+        scan_frame.grid(row=3, column=0, columnspan=3, pady=20)
+        
+        self.scan_button = ttk.Button(scan_frame, text="🔍 Scan for Videos", 
+                                     command=self.scan_videos, style="Accent.TButton")
+        self.scan_button.grid(row=0, column=0, padx=(0, 10))
+        
+        self.cancel_scan_button = ttk.Button(scan_frame, text="Cancel", 
+                                           command=self.cancel_scan, state='disabled')
+        self.cancel_scan_button.grid(row=0, column=1, padx=(0, 10))
+        
+        # Scanning progress
+        self.scan_progress = ttk.Progressbar(scan_frame, mode='indeterminate', length=200)
+        self.scan_progress.grid(row=0, column=2, padx=(10, 0))
+        
+        self.scan_status = ttk.Label(scan_frame, text="", foreground="blue")
+        self.scan_status.grid(row=0, column=3, padx=(10, 0))
         
         # Video list frame
         list_frame = ttk.LabelFrame(main_frame, text="Found Videos", padding="10")
@@ -73,28 +135,48 @@ class VideoConverter:
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)
         
+        # Video list controls
+        list_controls = ttk.Frame(list_frame)
+        list_controls.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Button(list_controls, text="Select All", command=self.select_all_videos, 
+                  style="Small.TButton").grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(list_controls, text="Select None", command=self.select_no_videos, 
+                  style="Small.TButton").grid(row=0, column=1, padx=(0, 5))
+        
+        self.video_count_label = ttk.Label(list_controls, text="No videos found")
+        self.video_count_label.grid(row=0, column=2, padx=(20, 0))
+        
         # Treeview for video list
-        columns = ('File', 'Size', 'Format', 'Status')
+        columns = ('Select', 'File', 'Size', 'Format', 'Status')
         self.video_tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=8)
         
         # Define headings
+        self.video_tree.heading('Select', text='✓')
         self.video_tree.heading('File', text='File Path')
         self.video_tree.heading('Size', text='Size (MB)')
         self.video_tree.heading('Format', text='Format')
         self.video_tree.heading('Status', text='Status')
         
         # Configure column widths
-        self.video_tree.column('File', width=400)
+        self.video_tree.column('Select', width=40)
+        self.video_tree.column('File', width=350)
         self.video_tree.column('Size', width=80)
         self.video_tree.column('Format', width=80)
         self.video_tree.column('Status', width=120)
+        
+        # Bind double-click to toggle selection
+        self.video_tree.bind('<Double-1>', self.toggle_video_selection)
         
         # Scrollbar for treeview
         tree_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.video_tree.yview)
         self.video_tree.configure(yscrollcommand=tree_scrollbar.set)
         
-        self.video_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        tree_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.video_tree.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        tree_scrollbar.grid(row=1, column=1, sticky=(tk.N, tk.S))
+        
+        # Update row configuration
+        list_frame.rowconfigure(1, weight=1)
         
         # Conversion options frame
         options_frame = ttk.LabelFrame(main_frame, text="Conversion Options", padding="10")
@@ -115,10 +197,21 @@ class VideoConverter:
                                       state="readonly", width=15)
         resolution_combo.grid(row=0, column=3, sticky=tk.W)
         
-        # Convert button
-        self.convert_button = ttk.Button(main_frame, text="Convert All Videos", 
+        # Convert controls frame
+        convert_frame = ttk.Frame(main_frame)
+        convert_frame.grid(row=6, column=0, columnspan=3, pady=20)
+        
+        self.convert_button = ttk.Button(convert_frame, text="🎬 Convert Selected Videos", 
                                        command=self.start_conversion, style="Accent.TButton")
-        self.convert_button.grid(row=6, column=0, columnspan=3, pady=20)
+        self.convert_button.grid(row=0, column=0, padx=(0, 10))
+        
+        self.cancel_convert_button = ttk.Button(convert_frame, text="Cancel", 
+                                              command=self.cancel_conversion, state='disabled')
+        self.cancel_convert_button.grid(row=0, column=1, padx=(0, 10))
+        
+        # Show logs toggle
+        ttk.Checkbutton(convert_frame, text="Show Logs", variable=self.show_logs,
+                       command=self.toggle_logs).grid(row=0, column=2, padx=(20, 0))
         
         # Progress bar
         self.progress_var = tk.DoubleVar()
@@ -130,23 +223,207 @@ class VideoConverter:
         self.status_label = ttk.Label(main_frame, textvariable=self.status_var)
         self.status_label.grid(row=8, column=0, columnspan=3, pady=5)
         
-        # Log frame
-        log_frame = ttk.LabelFrame(main_frame, text="Conversion Log", padding="10")
-        log_frame.grid(row=9, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        
-        # Log text area
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=6, width=80)
-        self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
         # Configure grid weights for resizing
         main_frame.rowconfigure(4, weight=1)
-        main_frame.rowconfigure(9, weight=1)
+        
+        # Create logs frame (initially hidden)
+        self.create_logs_frame(main_frame)
         
         # Start log queue processing
         self.process_log_queue()
         
+    def setup_styles(self):
+        """Setup custom styles for the UI"""
+        style = ttk.Style()
+        
+        # Configure styles for better appearance
+        style.configure("Title.TLabel", foreground="#2c3e50", font=("Segoe UI", 18, "bold"))
+        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
+        style.configure("Small.TButton", font=("Segoe UI", 9))
+        
+        # Try to use modern theme if available
+        try:
+            style.theme_use('clam')
+        except:
+            pass
+            
+    def create_logs_frame(self, parent):
+        """Create the logs frame (initially hidden)"""
+        self.logs_frame = ttk.LabelFrame(parent, text="Conversion Log", padding="10")
+        self.logs_frame.columnconfigure(0, weight=1)
+        self.logs_frame.rowconfigure(0, weight=1)
+        
+        # Log text area
+        self.log_text = scrolledtext.ScrolledText(self.logs_frame, height=6, width=80)
+        self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+    def toggle_logs(self):
+        """Toggle the visibility of the logs panel"""
+        if self.show_logs.get():
+            self.logs_frame.grid(row=9, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
+            self.root.geometry("900x850")  # Expand window
+            # Configure grid weight for logs
+            self.logs_frame.master.rowconfigure(9, weight=1)
+        else:
+            self.logs_frame.grid_remove()
+            self.root.geometry("900x700")  # Shrink window
+            # Remove grid weight for logs
+            self.logs_frame.master.rowconfigure(9, weight=0)
+            
+    def load_settings(self):
+        """Load settings from config file"""
+        config = configparser.ConfigParser()
+        config_file = Path.home() / '.video_converter_settings.ini'
+        
+        if config_file.exists():
+            try:
+                config.read(config_file)
+                if 'Paths' in config:
+                    self.source_folder.set(config['Paths'].get('source_folder', ''))
+                    self.output_folder.set(config['Paths'].get('output_folder', ''))
+                if 'UI' in config:
+                    self.show_logs.set(config['UI'].getboolean('show_logs', False))
+            except Exception as e:
+                print(f"Error loading settings: {e}")
+                
+    def save_settings(self):
+        """Save settings to config file"""
+        config = configparser.ConfigParser()
+        config['Paths'] = {
+            'source_folder': self.source_folder.get(),
+            'output_folder': self.output_folder.get()
+        }
+        config['UI'] = {
+            'show_logs': str(self.show_logs.get())
+        }
+        
+        config_file = Path.home() / '.video_converter_settings.ini'
+        try:
+            with open(config_file, 'w') as f:
+                config.write(f)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+            
+    def show_settings(self):
+        """Show settings dialog"""
+        settings_window = tk.Toplevel(self.root)
+        settings_window.title("Settings")
+        settings_window.geometry("400x300")
+        settings_window.transient(self.root)
+        settings_window.grab_set()
+        
+        # Center the window
+        settings_window.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
+        
+        main_frame = ttk.Frame(settings_window, padding="20")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        ttk.Label(main_frame, text="Settings", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, pady=(0, 20))
+        
+        # Quality presets
+        ttk.Label(main_frame, text="Default Quality:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        quality_combo = ttk.Combobox(main_frame, values=["high", "medium", "low"], state="readonly")
+        quality_combo.set(self.quality_var.get())
+        quality_combo.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5)
+        
+        # Auto-save settings
+        auto_save_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(main_frame, text="Auto-save settings", variable=auto_save_var).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=5)
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=20)
+        
+        def save_and_close():
+            self.quality_var.set(quality_combo.get())
+            self.save_settings()
+            settings_window.destroy()
+            
+        ttk.Button(button_frame, text="Save", command=save_and_close).grid(row=0, column=0, padx=(0, 10))
+        ttk.Button(button_frame, text="Cancel", command=settings_window.destroy).grid(row=0, column=1)
+        
+        main_frame.columnconfigure(1, weight=1)
+        settings_window.columnconfigure(0, weight=1)
+        settings_window.rowconfigure(0, weight=1)
+        
+    def show_about(self):
+        """Show about dialog"""
+        about_window = tk.Toplevel(self.root)
+        about_window.title("About")
+        about_window.geometry("450x350")
+        about_window.transient(self.root)
+        about_window.grab_set()
+        
+        # Center the window
+        about_window.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
+        
+        main_frame = ttk.Frame(about_window, padding="20")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # App info
+        ttk.Label(main_frame, text=APP_NAME, font=("Segoe UI", 16, "bold")).grid(row=0, column=0, pady=(0, 10))
+        ttk.Label(main_frame, text=f"Version: {APP_VERSION}").grid(row=1, column=0, pady=2)
+        ttk.Label(main_frame, text=f"Author: {APP_AUTHOR}").grid(row=2, column=0, pady=2)
+        ttk.Label(main_frame, text=f"License: {APP_LICENSE}").grid(row=3, column=0, pady=2)
+        
+        # Description
+        desc_text = ("A free, open-source video converter that transforms your videos "
+                    "into iPhone-compatible formats. Supports batch processing and "
+                    "maintains folder structure.")
+        ttk.Label(main_frame, text=desc_text, wraplength=400, justify=tk.LEFT).grid(row=4, column=0, pady=20)
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=5, column=0, pady=10)
+        
+        def open_github():
+            webbrowser.open(APP_GITHUB)
+            
+        ttk.Button(button_frame, text="🌐 GitHub", command=open_github).grid(row=0, column=0, padx=(0, 10))
+        ttk.Button(button_frame, text="Close", command=about_window.destroy).grid(row=0, column=1)
+        
+        about_window.columnconfigure(0, weight=1)
+        about_window.rowconfigure(0, weight=1)
+        
+    def select_all_videos(self):
+        """Select all videos for conversion"""
+        for i, video_info in enumerate(self.video_files):
+            video_info['selected'] = True
+            if i < len(self.video_tree.get_children()):
+                item = self.video_tree.get_children()[i]
+                values = list(self.video_tree.item(item, 'values'))
+                values[0] = "✓"
+                self.video_tree.item(item, values=values)
+                
+    def select_no_videos(self):
+        """Deselect all videos"""
+        for i, video_info in enumerate(self.video_files):
+            video_info['selected'] = False
+            if i < len(self.video_tree.get_children()):
+                item = self.video_tree.get_children()[i]
+                values = list(self.video_tree.item(item, 'values'))
+                values[0] = ""
+                self.video_tree.item(item, values=values)
+                
+    def toggle_video_selection(self, event):
+        """Toggle selection of a video when double-clicked"""
+        item = self.video_tree.selection()[0]
+        index = self.video_tree.index(item)
+        
+        if index < len(self.video_files):
+            self.video_files[index]['selected'] = not self.video_files[index].get('selected', False)
+            values = list(self.video_tree.item(item, 'values'))
+            values[0] = "✓" if self.video_files[index]['selected'] else ""
+            self.video_tree.item(item, values=values)
+            
+    def cancel_scan(self):
+        """Cancel the scanning operation"""
+        self.is_scanning = False
+        
+    def cancel_conversion(self):
+        """Cancel the conversion operation"""
+        self.is_converting = False
+
     def check_ffmpeg(self):
         """Check if ffmpeg is installed"""
         try:
@@ -175,54 +452,94 @@ class VideoConverter:
             self.output_folder.set(folder)
             
     def scan_videos(self):
-        """Scan for video files in the source folder"""
-        self.log_message("Scanning for video files...")
-        self.video_files = []
-        
-        # Clear existing items
-        for item in self.video_tree.get_children():
-            self.video_tree.delete(item)
+        """Start scanning for video files in a separate thread"""
+        if self.is_scanning:
+            messagebox.showwarning("Warning", "Scanning already in progress!")
+            return
             
         source_path = Path(self.source_folder.get())
         if not source_path.exists():
             messagebox.showerror("Error", "Source folder does not exist!")
             return
             
-        # Video file extensions
-        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp'}
+        # Start scanning
+        self.is_scanning = True
+        self.scan_button.config(state='disabled')
+        self.cancel_scan_button.config(state='normal')
+        self.scan_progress.start()
+        self.scan_status.config(text="Scanning...")
         
-        # Recursively find video files
-        for file_path in source_path.rglob('*'):
-            if file_path.is_file() and file_path.suffix.lower() in video_extensions:
-                try:
-                    # Get file size in MB
-                    size_mb = file_path.stat().st_size / (1024 * 1024)
+        # Start scanning thread
+        self.scanning_thread = threading.Thread(target=self.scan_videos_thread)
+        self.scanning_thread.daemon = True
+        self.scanning_thread.start()
+        
+    def scan_videos_thread(self):
+        """Scan for video files in the source folder (runs in separate thread)"""
+        try:
+            self.log_queue.put(('log', "Scanning for video files..."))
+            self.video_files = []
+            
+            # Clear existing items
+            self.log_queue.put(('clear_tree', None))
+            
+            source_path = Path(self.source_folder.get())
+            
+            # Video file extensions
+            video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp'}
+            
+            found_count = 0
+            
+            # Recursively find video files
+            for file_path in source_path.rglob('*'):
+                if not self.is_scanning:  # Check if scanning was cancelled
+                    break
                     
-                    # Get video info
-                    video_info = self.get_video_info(str(file_path))
-                    format_info = video_info.get('format', 'Unknown')
-                    
-                    # Add to list
-                    self.video_files.append({
-                        'path': str(file_path),
-                        'size': size_mb,
-                        'format': format_info,
-                        'status': 'Ready'
-                    })
-                    
-                    # Add to treeview
-                    relative_path = str(file_path.relative_to(source_path))
-                    self.video_tree.insert('', 'end', values=(
-                        relative_path,
-                        f"{size_mb:.1f}",
-                        format_info,
-                        'Ready'
-                    ))
-                    
-                except Exception as e:
-                    self.log_message(f"Error processing {file_path}: {str(e)}")
-                    
-        self.log_message(f"Found {len(self.video_files)} video files")
+                if file_path.is_file() and file_path.suffix.lower() in video_extensions:
+                    try:
+                        # Update scan status
+                        self.log_queue.put(('scan_status', f"Scanning... Found {found_count} videos"))
+                        
+                        # Get file size in MB
+                        size_mb = file_path.stat().st_size / (1024 * 1024)
+                        
+                        # Get video info
+                        video_info = self.get_video_info(str(file_path))
+                        format_info = video_info.get('format', 'Unknown')
+                        
+                        # Add to list
+                        video_data = {
+                            'path': str(file_path),
+                            'size': size_mb,
+                            'format': format_info,
+                            'status': 'Ready',
+                            'selected': True  # Default to selected
+                        }
+                        self.video_files.append(video_data)
+                        
+                        # Add to treeview
+                        relative_path = str(file_path.relative_to(source_path))
+                        tree_values = (
+                            "✓",  # Selected by default
+                            relative_path,
+                            f"{size_mb:.1f}",
+                            format_info,
+                            'Ready'
+                        )
+                        self.log_queue.put(('add_tree_item', tree_values))
+                        
+                        found_count += 1
+                        
+                    except Exception as e:
+                        self.log_queue.put(('log', f"Error processing {file_path}: {str(e)}"))
+                        
+            # Scanning complete
+            self.log_queue.put(('log', f"Found {len(self.video_files)} video files"))
+            self.log_queue.put(('scan_complete', len(self.video_files)))
+            
+        except Exception as e:
+            self.log_queue.put(('log', f"Error during scanning: {str(e)}"))
+            self.log_queue.put(('scan_complete', 0))
         
     def get_video_info(self, file_path):
         """Get video information using ffprobe"""
@@ -251,6 +568,12 @@ class VideoConverter:
             messagebox.showwarning("Warning", "No videos to convert! Please scan for videos first.")
             return
             
+        # Check if any videos are selected
+        selected_videos = [v for v in self.video_files if v.get('selected', False)]
+        if not selected_videos:
+            messagebox.showwarning("Warning", "No videos selected for conversion! Please select at least one video.")
+            return
+            
         # Create output directory
         output_path = Path(self.output_folder.get())
         output_path.mkdir(parents=True, exist_ok=True)
@@ -258,38 +581,65 @@ class VideoConverter:
         # Start conversion thread
         self.is_converting = True
         self.convert_button.config(state='disabled')
+        self.cancel_convert_button.config(state='normal')
         self.conversion_thread = threading.Thread(target=self.convert_videos)
         self.conversion_thread.daemon = True
         self.conversion_thread.start()
         
     def convert_videos(self):
-        """Convert all videos to iPhone-compatible format"""
-        total_files = len(self.video_files)
+        """Convert selected videos to iPhone-compatible format"""
+        # Get only selected videos
+        selected_videos = [(i, v) for i, v in enumerate(self.video_files) if v.get('selected', False)]
+        total_files = len(selected_videos)
         
-        for i, video_info in enumerate(self.video_files):
+        if total_files == 0:
+            self.log_queue.put(('log', "No videos selected for conversion"))
+            self.log_queue.put(('conversion_done', None))
+            return
+            
+        converted_count = 0
+        failed_count = 0
+        
+        for processed, (original_index, video_info) in enumerate(selected_videos):
             if not self.is_converting:  # Check if conversion was cancelled
                 break
                 
             try:
                 # Update progress
-                progress = (i / total_files) * 100
+                progress = (processed / total_files) * 100
                 self.log_queue.put(('progress', progress))
-                self.log_queue.put(('status', f"Converting {i+1}/{total_files}: {Path(video_info['path']).name}"))
+                self.log_queue.put(('status', f"Converting {processed+1}/{total_files}: {Path(video_info['path']).name}"))
                 
                 # Convert video
                 success = self.convert_single_video(video_info)
                 
                 # Update status in treeview
                 status = 'Converted' if success else 'Failed'
-                self.log_queue.put(('update_tree', i, status))
+                self.log_queue.put(('update_tree', original_index, status))
+                
+                if success:
+                    converted_count += 1
+                else:
+                    failed_count += 1
                 
             except Exception as e:
                 self.log_queue.put(('log', f"Error converting {video_info['path']}: {str(e)}"))
-                self.log_queue.put(('update_tree', i, 'Failed'))
+                self.log_queue.put(('update_tree', original_index, 'Failed'))
+                failed_count += 1
                 
         # Conversion complete
         self.log_queue.put(('progress', 100))
-        self.log_queue.put(('status', 'Conversion complete!'))
+        
+        if self.is_converting:  # Only show completion message if not cancelled
+            completion_msg = f"Conversion complete! {converted_count} converted"
+            if failed_count > 0:
+                completion_msg += f", {failed_count} failed"
+            self.log_queue.put(('status', completion_msg))
+            self.log_queue.put(('log', completion_msg))
+        else:
+            self.log_queue.put(('status', 'Conversion cancelled'))
+            self.log_queue.put(('log', 'Conversion cancelled by user'))
+            
         self.log_queue.put(('conversion_done', None))
         
     def convert_single_video(self, video_info):
@@ -386,12 +736,37 @@ class VideoConverter:
                     if index < len(self.video_tree.get_children()):
                         item = self.video_tree.get_children()[index]
                         values = list(self.video_tree.item(item, 'values'))
-                        values[3] = status  # Update status column
+                        values[4] = status  # Update status column (adjusted for new Select column)
                         self.video_tree.item(item, values=values)
                         
                 elif message_type == 'conversion_done':
                     self.is_converting = False
                     self.convert_button.config(state='normal')
+                    self.cancel_convert_button.config(state='disabled')
+                    
+                elif message_type == 'clear_tree':
+                    for item in self.video_tree.get_children():
+                        self.video_tree.delete(item)
+                        
+                elif message_type == 'add_tree_item':
+                    self.video_tree.insert('', 'end', values=data)
+                    
+                elif message_type == 'scan_status':
+                    self.scan_status.config(text=data)
+                    
+                elif message_type == 'scan_complete':
+                    count = data
+                    self.is_scanning = False
+                    self.scan_button.config(state='normal')
+                    self.cancel_scan_button.config(state='disabled')
+                    self.scan_progress.stop()
+                    
+                    if count > 0:
+                        self.scan_status.config(text=f"Found {count} videos")
+                        self.video_count_label.config(text=f"Found {count} videos ({count} selected)")
+                    else:
+                        self.scan_status.config(text="No videos found")
+                        self.video_count_label.config(text="No videos found")
                     
         except queue.Empty:
             pass
@@ -407,20 +782,27 @@ class VideoConverter:
         
     def on_closing(self):
         """Handle application closing"""
-        if self.is_converting:
-            if messagebox.askokcancel("Quit", "Conversion in progress. Are you sure you want to quit?"):
+        if self.is_converting or self.is_scanning:
+            operations = []
+            if self.is_converting:
+                operations.append("conversion")
+            if self.is_scanning:
+                operations.append("scanning")
+            
+            operation_text = " and ".join(operations)
+            if messagebox.askokcancel("Quit", f"{operation_text.capitalize()} in progress. Are you sure you want to quit?"):
                 self.is_converting = False
+                self.is_scanning = False
+                self.save_settings()
                 self.root.destroy()
         else:
+            self.save_settings()
             self.root.destroy()
 
 def main():
     """Main function to run the application"""
     root = tk.Tk()
     app = VideoConverter(root)
-    
-    # Handle window closing
-    root.protocol("WM_DELETE_WINDOW", app.on_closing)
     
     # Start the GUI
     root.mainloop()
