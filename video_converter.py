@@ -4,7 +4,7 @@ Video Converter for iPhone Compatibility
 Converts video files in DCIM folder to iPhone-compatible formats
 
 Open Source Video Converter
-Version: 2.2.0 (Performance Overhauled)
+Version: 2.3.0 (Performance Overhauled)
 License: MIT
 GitHub: https://github.com/minermanNL/DCIM-Converter
 Author: Ivan van der Schuit
@@ -47,7 +47,7 @@ except:
 
 # Application constants
 APP_NAME = "Video Converter for iPhone"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 APP_AUTHOR = "Open Source Community"
 APP_LICENSE = "MIT"
 APP_GITHUB = "https://github.com/minermanNL/DCIM-Converter"
@@ -1209,28 +1209,60 @@ class VideoConverter:
             
             # Get video codec from streams
             codec = 'Unknown'
+            video_streams = []
+            audio_streams = []
+            
             for stream in info.get('streams', []):
                 if stream.get('codec_type') == 'video':
-                    codec = stream.get('codec_name', 'Unknown')
-                    break
+                    video_streams.append(stream)
+                    if codec == 'Unknown':
+                        codec = stream.get('codec_name', 'Unknown')
+                elif stream.get('codec_type') == 'audio':
+                    audio_streams.append(stream)
             
             compatible = format_name == 'MP4' and codec.lower() == 'h264'
+            
+            # Check for problematic characteristics
+            problematic = False
+            issues = []
+            
+            # Check for empty streams
+            if not video_streams and not audio_streams:
+                problematic = True
+                issues.append("No video or audio streams")
+            
+            # Check for corrupted duration
+            duration = info.get('format', {}).get('duration')
+            if duration and (float(duration) <= 0 or float(duration) > 7200):  # 0 or > 2 hours
+                problematic = True
+                issues.append(f"Invalid duration: {duration}")
+            
+            # Check for problematic audio
+            for stream in audio_streams:
+                if stream.get('codec_name') == 'unknown' or not stream.get('codec_name'):
+                    problematic = True
+                    issues.append("Unknown audio codec")
+                    break
             
             return {
                 'format': format_name,
                 'compatible': compatible,
-                'codec': codec
+                'codec': codec,
+                'problematic': problematic,
+                'issues': issues,
+                'video_streams': len(video_streams),
+                'audio_streams': len(audio_streams)
             }
             
         except subprocess.TimeoutExpired:
             logger.warning(f"ffprobe timeout for {file_path}")
-            return {'format': 'Timeout', 'compatible': False, 'codec': 'Unknown'}
+            return {'format': 'Timeout', 'compatible': False, 'codec': 'Unknown', 'problematic': True, 'issues': ['Timeout']}
         except json.JSONDecodeError:
             logger.warning(f"ffprobe JSON decode error for {file_path}")
-            return {'format': 'Error', 'compatible': False, 'codec': 'Unknown'}
+            return {'format': 'Error', 'compatible': False, 'codec': 'Unknown', 'problematic': True, 'issues': ['JSON decode error']}
         except Exception as e:
             logger.warning(f"ffprobe error for {file_path}: {e}")
-            return {'format': 'Error', 'compatible': False, 'codec': 'Unknown'}
+            return {'format': 'Error', 'compatible': False, 'codec': 'Unknown', 'problematic': True, 'issues': [str(e)]}
     
     def get_video_info_cached(self, file_path):
         """Get video info with caching for performance."""
@@ -1428,10 +1460,17 @@ class VideoConverter:
                         pass
             
             conversion_time = time.time() - self.conversion_start_time if self.conversion_start_time else 0
-            logger.info(f"Conversion completed: {successful} successful, {failed} failed, {skipped} skipped in {conversion_time:.1f} seconds")
+            processed_total = processed + 1 if processed < total else total
+            
+            logger.info(f"Conversion completed: {successful} successful, {failed} failed, {skipped} skipped, {processed_total} processed in {conversion_time:.1f} seconds")
+            
+            # Log summary statistics
+            if successful > 0:
+                avg_time = conversion_time / successful
+                logger.info(f"Average conversion time: {avg_time:.1f}s per successful video")
             
             self.ui_queue.put(('progress', 100))
-            self.ui_queue.put(('conversion_done', {'successful': successful, 'failed': failed, 'skipped': skipped}))
+            self.ui_queue.put(('conversion_done', {'successful': successful, 'failed': failed, 'skipped': skipped, 'processed': processed_total}))
             
         except Exception as e:
             logger.error(f"Critical error in conversion thread: {e}")
@@ -1466,120 +1505,250 @@ class VideoConverter:
                 logger.info(f"Skipped existing file: {input_path.name}")
                 return True
             
-            # Build and execute FFmpeg command
-            cmd = self.build_ffmpeg_command(str(input_path), str(output_file))
+            # Get video info to determine conversion strategy
+            video_info = self.get_video_info_cached(str(input_path))
             
-            try:
-                process = subprocess.Popen(
-                    cmd, 
-                    stdout=subprocess.PIPE, 
-                    stderr=subprocess.STDOUT,  # Combine stderr with stdout
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True
-                )
+            # Determine conversion strategies based on file characteristics
+            if video_info.get('problematic', False):
+                logger.warning(f"Detected problematic file {input_path.name}: {video_info.get('issues', [])}")
+                # Start with more compatible strategies for problematic files
+                conversion_strategies = [
+                    ('compatible', self.build_compatible_ffmpeg_command(str(input_path), str(output_file))),
+                    ('fallback', self.build_fallback_ffmpeg_command(str(input_path), str(output_file))),
+                    ('standard', self.build_ffmpeg_command(str(input_path), str(output_file)))
+                ]
+            else:
+                # Use standard strategy first for normal files
+                conversion_strategies = [
+                    ('standard', self.build_ffmpeg_command(str(input_path), str(output_file))),
+                    ('compatible', self.build_compatible_ffmpeg_command(str(input_path), str(output_file))),
+                    ('fallback', self.build_fallback_ffmpeg_command(str(input_path), str(output_file)))
+                ]
+            
+            for strategy_name, cmd in conversion_strategies:
+                logger.info(f"Trying {strategy_name} conversion strategy for {input_path.name}")
                 
-                # Monitor process with timeout and progress updates
-                start_time = time.time()
-                last_progress_time = start_time
-                output_lines = []
+                success = self.execute_ffmpeg_conversion(cmd, input_path, strategy_name)
                 
-                while process.poll() is None:
-                    if not self.is_converting or self.shutdown_event.is_set():
-                        logger.info(f"Terminating conversion of {input_path.name} due to cancellation")
+                if success:
+                    # Verify output file was created and has content
+                    if output_file.exists() and output_file.stat().st_size > 0:
+                        return True
+                    else:
+                        logger.warning(f"Output file empty or missing for {input_path.name}")
                         try:
-                            process.terminate()
-                            process.wait(timeout=10)
+                            output_file.unlink()  # Remove empty file
                         except:
-                            try:
-                                process.kill()
-                            except:
-                                pass
-                        return False
-                    
-                    # Check for timeout
-                    current_time = time.time()
-                    if current_time - start_time > FFMPEG_TIMEOUT:
-                        logger.error(f"FFmpeg timeout for {input_path.name} after {FFMPEG_TIMEOUT} seconds")
-                        try:
-                            process.terminate()
-                            process.wait(timeout=10)
-                        except:
-                            try:
-                                process.kill()
-                            except:
-                                pass
-                        self.log_message(f"Timeout converting {input_path.name}", "error")
-                        return False
-                    
-                    # Log progress every 30 seconds
-                    if current_time - last_progress_time > 30:
-                        elapsed = current_time - start_time
-                        logger.info(f"Converting {input_path.name} - {elapsed:.1f}s elapsed")
-                        last_progress_time = current_time
-                        
-                        # Update activity timestamp
-                        if hasattr(self, 'last_conversion_activity'):
-                            self.last_conversion_activity = current_time
-                    
-                    # Read any available output
-                    try:
-                        if process.stdout:
-                            line = process.stdout.readline()
-                            if line:
-                                output_lines.append(line.strip())
-                                # Keep only last 10 lines to prevent memory issues
-                                if len(output_lines) > 10:
-                                    output_lines.pop(0)
-                    except:
-                        pass
-                    
-                    # Small delay to prevent busy waiting
-                    time.sleep(0.5)
+                            pass
                 
-                # Get any remaining output
-                try:
-                    if process.stdout:
-                        remaining_output = process.stdout.read()
-                        if remaining_output:
-                            output_lines.extend(remaining_output.strip().split('\n'))
-                except:
-                    pass
-                
-                elapsed_time = time.time() - start_time
-                
-                if process.returncode == 0:
-                    self.log_message(f"Converted {input_path.name} in {elapsed_time:.1f}s", "success")
-                    logger.info(f"Successfully converted {input_path.name} in {elapsed_time:.1f}s")
-                    return True
-                else:
-                    error_output = '\n'.join(output_lines[-3:]) if output_lines else "Unknown error"
-                    self.log_message(f"Failed {input_path.name}: {error_output[:200]}", "error")
-                    logger.error(f"Failed to convert {input_path.name} (exit code {process.returncode}): {error_output[:200]}")
-                    return False
-                    
-            except Exception as e:
-                logger.error(f"Error running FFmpeg for {input_path.name}: {e}")
-                self.log_message(f"Error converting {input_path.name}: {str(e)}", "error")
-                return False
+                # If not the last strategy, try next one
+                if strategy_name != 'fallback':
+                    logger.info(f"{strategy_name} strategy failed for {input_path.name}, trying next strategy")
+                    continue
+            
+            # All strategies failed
+            logger.error(f"All conversion strategies failed for {input_path.name}")
+            self.log_message(f"Failed to convert {input_path.name} - all strategies exhausted", "error")
+            return False
                 
         except Exception as e:
             logger.error(f"Error in convert_single_video: {e}")
             self.log_message(f"Error converting {video.get('path', 'unknown')}: {str(e)}", "error")
             return False
 
-    def build_ffmpeg_command(self, input_file, output_file):
-        """Build FFmpeg command with error handling."""
+    def execute_ffmpeg_conversion(self, cmd, input_path, strategy_name):
+        """Execute FFmpeg conversion with monitoring."""
+        try:
+            process = subprocess.Popen(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT,  # Combine stderr with stdout
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            # Monitor process with timeout and progress updates
+            start_time = time.time()
+            last_progress_time = start_time
+            output_lines = []
+            
+            while process.poll() is None:
+                if not self.is_converting or self.shutdown_event.is_set():
+                    logger.info(f"Terminating conversion of {input_path.name} due to cancellation")
+                    try:
+                        process.terminate()
+                        process.wait(timeout=10)
+                    except:
+                        try:
+                            process.kill()
+                        except:
+                            pass
+                    return False
+                
+                # Check for timeout
+                current_time = time.time()
+                if current_time - start_time > FFMPEG_TIMEOUT:
+                    logger.error(f"FFmpeg timeout for {input_path.name} after {FFMPEG_TIMEOUT} seconds")
+                    try:
+                        process.terminate()
+                        process.wait(timeout=10)
+                    except:
+                        try:
+                            process.kill()
+                        except:
+                            pass
+                    self.log_message(f"Timeout converting {input_path.name}", "error")
+                    return False
+                
+                # Log progress every 30 seconds
+                if current_time - last_progress_time > 30:
+                    elapsed = current_time - start_time
+                    logger.info(f"Converting {input_path.name} ({strategy_name}) - {elapsed:.1f}s elapsed")
+                    last_progress_time = current_time
+                    
+                    # Update activity timestamp
+                    if hasattr(self, 'last_conversion_activity'):
+                        self.last_conversion_activity = current_time
+                
+                # Read any available output
+                try:
+                    if process.stdout:
+                        line = process.stdout.readline()
+                        if line:
+                            output_lines.append(line.strip())
+                            # Keep only last 10 lines to prevent memory issues
+                            if len(output_lines) > 10:
+                                output_lines.pop(0)
+                except:
+                    pass
+                
+                # Small delay to prevent busy waiting
+                time.sleep(0.5)
+            
+            # Get any remaining output
+            try:
+                if process.stdout:
+                    remaining_output = process.stdout.read()
+                    if remaining_output:
+                        output_lines.extend(remaining_output.strip().split('\n'))
+            except:
+                pass
+            
+            elapsed_time = time.time() - start_time
+            
+            if process.returncode == 0:
+                self.log_message(f"Converted {input_path.name} in {elapsed_time:.1f}s ({strategy_name})", "success")
+                logger.info(f"Successfully converted {input_path.name} in {elapsed_time:.1f}s using {strategy_name} strategy")
+                return True
+            else:
+                error_output = '\n'.join(output_lines[-3:]) if output_lines else "Unknown error"
+                logger.warning(f"Failed to convert {input_path.name} using {strategy_name} strategy (exit code {process.returncode}): {error_output[:200]}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error executing FFmpeg for {input_path.name}: {e}")
+            return False
+
+    def build_compatible_ffmpeg_command(self, input_file, output_file):
+        """Build more compatible FFmpeg command for problematic files."""
         try:
             cmd = ['ffmpeg', '-i', input_file, '-y']
             
-            # Video codec settings
+            # More aggressive error handling
+            cmd.extend([
+                '-err_detect', 'ignore_err',
+                '-fflags', '+genpts+igndts',
+                '-avoid_negative_ts', 'make_zero',
+                '-max_muxing_queue_size', '1024'
+            ])
+            
+            # Basic video settings
             cmd.extend([
                 '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '25',
+                '-pix_fmt', 'yuv420p'
+            ])
+            
+            # More forgiving audio settings
+            cmd.extend([
                 '-c:a', 'aac',
+                '-ar', '44100',
+                '-ab', '96k',
+                '-ac', '2',
+                '-strict', '-2'
+            ])
+            
+            # Audio filters for problematic streams
+            cmd.extend([
+                '-af', 'aresample=async=1:first_pts=0,volume=1.0',
+                '-shortest'  # Stop at shortest stream
+            ])
+            
+            # Output settings
+            cmd.extend([
+                '-movflags', '+faststart',
+                '-t', '3600',  # Max 1 hour
+                output_file
+            ])
+            
+            return cmd
+            
+        except Exception as e:
+            logger.error(f"Error building compatible FFmpeg command: {e}")
+            return ['ffmpeg', '-i', input_file, '-y', '-c:v', 'libx264', '-c:a', 'aac', output_file]
+
+    def build_fallback_ffmpeg_command(self, input_file, output_file):
+        """Build minimal FFmpeg command for very problematic files."""
+        try:
+            cmd = ['ffmpeg', '-i', input_file, '-y']
+            
+            # Minimal error handling
+            cmd.extend([
+                '-err_detect', 'ignore_err',
+                '-fflags', '+genpts+igndts+ignidx',
+                '-avoid_negative_ts', 'make_zero'
+            ])
+            
+            # Copy video if possible, otherwise re-encode simply
+            cmd.extend([
+                '-c:v', 'copy',  # Try to copy video first
+                '-c:a', 'copy'   # Try to copy audio first
+            ])
+            
+            # If copying fails, FFmpeg will automatically fallback to encoding
+            cmd.extend([
+                '-movflags', '+faststart',
+                '-t', '3600',
+                output_file
+            ])
+            
+            return cmd
+            
+        except Exception as e:
+            logger.error(f"Error building fallback FFmpeg command: {e}")
+            return ['ffmpeg', '-i', input_file, '-y', '-c', 'copy', output_file]
+
+    def build_ffmpeg_command(self, input_file, output_file):
+        """Build FFmpeg command with robust error handling and compatibility."""
+        try:
+            cmd = ['ffmpeg', '-i', input_file, '-y']
+            
+            # Add error resilience and compatibility flags
+            cmd.extend([
+                '-err_detect', 'ignore_err',  # Ignore minor errors
+                '-fflags', '+genpts',         # Generate presentation timestamps
+                '-avoid_negative_ts', 'make_zero'  # Handle negative timestamps
+            ])
+            
+            # Video codec settings with better compatibility
+            cmd.extend([
+                '-c:v', 'libx264',
                 '-profile:v', 'high',
                 '-level', '4.0',
-                '-pix_fmt', 'yuv420p'
+                '-pix_fmt', 'yuv420p',
+                '-preset', 'medium'  # Balance between speed and compression
             ])
             
             # Quality settings
@@ -1595,11 +1764,27 @@ class VideoConverter:
                 except ValueError:
                     logger.warning(f"Invalid resolution format: {res}")
             
-            # Audio settings
-            cmd.extend(['-ar', '44100', '-ab', '128k'])
+            # Audio settings with better error handling
+            cmd.extend([
+                '-c:a', 'aac',
+                '-ar', '44100',
+                '-ab', '128k',
+                '-ac', '2',  # Force stereo
+                '-aac_coder', 'twoloop',  # Better AAC encoder
+                '-q:a', '2'  # High quality audio
+            ])
+            
+            # Handle problematic audio streams
+            cmd.extend([
+                '-af', 'aresample=async=1',  # Resample audio to fix sync issues
+                '-bsf:a', 'aac_adtstoasc'    # Convert ADTS to ASC for MP4
+            ])
             
             # Optimization for streaming
             cmd.extend(['-movflags', '+faststart'])
+            
+            # Set maximum duration to prevent infinite streams
+            cmd.extend(['-t', '3600'])  # Max 1 hour per video
             
             # Output file
             cmd.append(output_file)
@@ -1608,8 +1793,16 @@ class VideoConverter:
             
         except Exception as e:
             logger.error(f"Error building FFmpeg command: {e}")
-            # Return basic command as fallback
-            return ['ffmpeg', '-i', input_file, '-y', '-c:v', 'libx264', '-c:a', 'aac', output_file]
+            # Return robust fallback command
+            return [
+                'ffmpeg', '-i', input_file, '-y',
+                '-c:v', 'libx264', '-c:a', 'aac',
+                '-preset', 'medium', '-crf', '23',
+                '-ar', '44100', '-ab', '128k', '-ac', '2',
+                '-err_detect', 'ignore_err',
+                '-movflags', '+faststart',
+                output_file
+            ]
 
     def backup_and_delete(self, original_path):
         """Backup and delete original file with error handling."""
@@ -1800,6 +1993,7 @@ class VideoConverter:
                 successful = data.get('successful', 0)
                 failed = data.get('failed', 0)
                 skipped = data.get('skipped', 0)
+                processed = data.get('processed', successful + failed + skipped)
                 
                 status_parts = []
                 if successful > 0:
@@ -1814,13 +2008,14 @@ class VideoConverter:
                 
                 # Show appropriate message dialog
                 if failed > 0:
-                    message = f"Conversion finished:\n• {successful} successful\n• {failed} failed\n• {skipped} skipped\n\nCheck logs for failure details."
+                    success_rate = (successful / processed * 100) if processed > 0 else 0
+                    message = f"Conversion finished:\n• {successful} successful\n• {failed} failed\n• {skipped} skipped\n• {processed} total processed\n• {success_rate:.1f}% success rate\n\nCheck logs for failure details."
                     messagebox.showwarning("Conversion Complete", message)
                 elif successful > 0:
-                    message = f"Conversion successful:\n• {successful} converted\n• {skipped} skipped (already exist)"
+                    message = f"Conversion successful:\n• {successful} converted\n• {skipped} skipped (already exist)\n• {processed} total processed"
                     messagebox.showinfo("Conversion Complete", message)
                 else:
-                    messagebox.showinfo("Conversion Complete", "All files were skipped (already exist)")
+                    messagebox.showinfo("Conversion Complete", f"All {processed} files were skipped (already exist)")
             else:
                 self.status_var.set("Conversion complete")
                 
