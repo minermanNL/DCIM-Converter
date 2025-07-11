@@ -7,7 +7,7 @@ Open Source Video Converter
 Version: 2.2.0 (Performance Overhauled)
 License: MIT
 GitHub: https://github.com/minermanNL/DCIM-Converter
-Author: Open Source Community 
+Author: Ivan van der Schuit
 """
 
 # Import tkinterdnd2 before tkinter
@@ -65,7 +65,7 @@ BATCH_SIZE = 25  # Reduced for better memory management
 UI_UPDATE_INTERVAL = 100  # Slightly slower for stability
 QUEUE_PROCESS_LIMIT = 5  # Reduced to prevent UI freezing
 LARGE_FILE_THRESHOLD = 50 * 1024 * 1024  # 50MB threshold (reduced)
-MAX_QUEUE_SIZE = 100  # Prevent unlimited queue growth
+MAX_QUEUE_SIZE = 500  # Increased to handle bulk operations
 MAX_CACHE_SIZE = 200  # Limit cache size to prevent memory leaks
 FFMPEG_TIMEOUT = 300  # 5 minutes timeout for ffmpeg operations
 SCAN_TIMEOUT = 30  # 30 seconds timeout for file scanning
@@ -273,7 +273,12 @@ def safe_thread_pool(max_workers=None):
     finally:
         if executor:
             try:
-                executor.shutdown(wait=True, timeout=10)
+                # Python 3.9+ supports timeout parameter
+                import sys
+                if sys.version_info >= (3, 9):
+                    executor.shutdown(wait=True, timeout=10)
+                else:
+                    executor.shutdown(wait=True)
             except Exception as e:
                 logger.error(f"Error shutting down thread pool: {e}")
 
@@ -332,6 +337,10 @@ class VideoConverter:
         # Performance monitoring
         self.scan_start_time = None
         self.conversion_start_time = None
+        
+        # Conversion watchdog to prevent deadlocks
+        self.last_conversion_activity = None
+        self.conversion_watchdog_thread = None
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -1301,6 +1310,14 @@ class VideoConverter:
             )
             self.conversion_thread.start()
             
+            # Start conversion watchdog
+            self.last_conversion_activity = time.time()
+            self.conversion_watchdog_thread = threading.Thread(
+                target=self.conversion_watchdog, 
+                daemon=True
+            )
+            self.conversion_watchdog_thread.start()
+            
             logger.info(f"Started conversion of {len(selected)} videos")
             
         except Exception as e:
@@ -1316,9 +1333,13 @@ class VideoConverter:
             total = len(selected)
             successful = 0
             failed = 0
+            skipped = 0
+            
+            logger.info(f"Starting bulk conversion of {total} videos")
             
             for processed, video in enumerate(selected):
                 if not self.is_converting or self.shutdown_event.is_set():
+                    logger.info(f"Conversion cancelled at video {processed+1}/{total}")
                     break
                 
                 try:
@@ -1329,14 +1350,44 @@ class VideoConverter:
                         video['compatible'] = video_info['compatible']
                     
                     index = self.video_files.index(video)
-                    self.ui_queue.put(('update_tree', (index, 'Converting', '0%')))
-                    self.ui_queue.put(('status', f"Converting {processed+1}/{total}: {Path(video['path']).name}"))
+                    filename = Path(video['path']).name
                     
-                    # Update progress
+                    # Update UI with current status
+                    self.ui_queue.put(('update_tree', (index, 'Converting', '0%')))
+                    status_msg = f"Converting {processed+1}/{total}: {filename}"
+                    self.ui_queue.put(('status', status_msg))
+                    
+                    # Update progress bar
                     progress = int((processed / total) * 100)
                     self.ui_queue.put(('progress', progress))
                     
+                    logger.info(f"Processing video {processed+1}/{total}: {filename}")
+                    
+                    # Update activity timestamp
+                    self.last_conversion_activity = time.time()
+                    
+                    # Check if file already exists (skip)
+                    input_path = Path(video['path'])
+                    source_path = Path(self.source_folder.get())
+                    output_path = Path(self.output_folder.get())
+                    
+                    try:
+                        relative = input_path.relative_to(source_path)
+                    except ValueError:
+                        relative = input_path.name
+                    
+                    output_file = output_path / Path(relative).with_suffix('.mp4')
+                    
+                    if output_file.exists():
+                        skipped += 1
+                        self.ui_queue.put(('update_tree', (index, 'Skipped', 'Exists')))
+                        logger.info(f"Skipped existing file: {filename}")
+                        continue
+                    
+                    # Perform conversion
+                    conversion_start = time.time()
                     success = self.convert_single_video(video, index)
+                    conversion_time = time.time() - conversion_start
                     
                     if success:
                         successful += 1
@@ -1346,10 +1397,13 @@ class VideoConverter:
                         # Delete original if requested
                         if self.delete_originals.get():
                             self.backup_and_delete(video['path'])
+                        
+                        logger.info(f"Successfully converted {filename} in {conversion_time:.1f}s")
                     else:
                         failed += 1
                         status = 'Failed'
                         progress_text = 'Failed'
+                        logger.error(f"Failed to convert {filename}")
                     
                     self.ui_queue.put(('update_tree', (index, status, progress_text)))
                     
@@ -1358,6 +1412,11 @@ class VideoConverter:
                         if not self.resource_manager.check_memory_usage():
                             logger.warning("High memory usage during conversion")
                             self.resource_manager.force_garbage_collection()
+                    
+                    # Log progress summary every 10 videos
+                    if (processed + 1) % 10 == 0:
+                        elapsed = time.time() - self.conversion_start_time if self.conversion_start_time else 0
+                        logger.info(f"Progress: {processed+1}/{total} videos processed in {elapsed:.1f}s (Success: {successful}, Failed: {failed}, Skipped: {skipped})")
                     
                 except Exception as e:
                     logger.error(f"Error converting video {video.get('path', 'unknown')}: {e}")
@@ -1369,15 +1428,15 @@ class VideoConverter:
                         pass
             
             conversion_time = time.time() - self.conversion_start_time if self.conversion_start_time else 0
-            logger.info(f"Conversion completed: {successful} successful, {failed} failed in {conversion_time:.1f} seconds")
+            logger.info(f"Conversion completed: {successful} successful, {failed} failed, {skipped} skipped in {conversion_time:.1f} seconds")
             
             self.ui_queue.put(('progress', 100))
-            self.ui_queue.put(('conversion_done', {'successful': successful, 'failed': failed}))
+            self.ui_queue.put(('conversion_done', {'successful': successful, 'failed': failed, 'skipped': skipped}))
             
         except Exception as e:
             logger.error(f"Critical error in conversion thread: {e}")
             logger.error(traceback.format_exc())
-            self.ui_queue.put(('conversion_done', {'successful': 0, 'failed': total}))
+            self.ui_queue.put(('conversion_done', {'successful': 0, 'failed': total, 'skipped': 0}))
 
     def convert_single_video(self, video, index):
         """Convert a single video with comprehensive error handling."""
@@ -1385,6 +1444,9 @@ class VideoConverter:
             input_path = Path(video['path'])
             source_path = Path(self.source_folder.get())
             output_path = Path(self.output_folder.get())
+            
+            # Log conversion start
+            logger.info(f"Starting conversion of {input_path.name}")
             
             # Calculate relative path and output file
             try:
@@ -1401,6 +1463,7 @@ class VideoConverter:
             # Check if output file already exists
             if output_file.exists():
                 self.log_message(f"Skipping {input_path.name} - already exists", "info")
+                logger.info(f"Skipped existing file: {input_path.name}")
                 return True
             
             # Build and execute FFmpeg command
@@ -1410,14 +1473,20 @@ class VideoConverter:
                 process = subprocess.Popen(
                     cmd, 
                     stdout=subprocess.PIPE, 
-                    stderr=subprocess.PIPE, 
-                    text=True
+                    stderr=subprocess.STDOUT,  # Combine stderr with stdout
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
                 )
                 
-                # Monitor process with timeout
+                # Monitor process with timeout and progress updates
                 start_time = time.time()
+                last_progress_time = start_time
+                output_lines = []
+                
                 while process.poll() is None:
                     if not self.is_converting or self.shutdown_event.is_set():
+                        logger.info(f"Terminating conversion of {input_path.name} due to cancellation")
                         try:
                             process.terminate()
                             process.wait(timeout=10)
@@ -1429,8 +1498,9 @@ class VideoConverter:
                         return False
                     
                     # Check for timeout
-                    if time.time() - start_time > FFMPEG_TIMEOUT:
-                        logger.error(f"FFmpeg timeout for {input_path.name}")
+                    current_time = time.time()
+                    if current_time - start_time > FFMPEG_TIMEOUT:
+                        logger.error(f"FFmpeg timeout for {input_path.name} after {FFMPEG_TIMEOUT} seconds")
                         try:
                             process.terminate()
                             process.wait(timeout=10)
@@ -1442,15 +1512,50 @@ class VideoConverter:
                         self.log_message(f"Timeout converting {input_path.name}", "error")
                         return False
                     
+                    # Log progress every 30 seconds
+                    if current_time - last_progress_time > 30:
+                        elapsed = current_time - start_time
+                        logger.info(f"Converting {input_path.name} - {elapsed:.1f}s elapsed")
+                        last_progress_time = current_time
+                        
+                        # Update activity timestamp
+                        if hasattr(self, 'last_conversion_activity'):
+                            self.last_conversion_activity = current_time
+                    
+                    # Read any available output
+                    try:
+                        if process.stdout:
+                            line = process.stdout.readline()
+                            if line:
+                                output_lines.append(line.strip())
+                                # Keep only last 10 lines to prevent memory issues
+                                if len(output_lines) > 10:
+                                    output_lines.pop(0)
+                    except:
+                        pass
+                    
                     # Small delay to prevent busy waiting
                     time.sleep(0.5)
                 
+                # Get any remaining output
+                try:
+                    if process.stdout:
+                        remaining_output = process.stdout.read()
+                        if remaining_output:
+                            output_lines.extend(remaining_output.strip().split('\n'))
+                except:
+                    pass
+                
+                elapsed_time = time.time() - start_time
+                
                 if process.returncode == 0:
-                    self.log_message(f"Converted {input_path.name}", "success")
+                    self.log_message(f"Converted {input_path.name} in {elapsed_time:.1f}s", "success")
+                    logger.info(f"Successfully converted {input_path.name} in {elapsed_time:.1f}s")
                     return True
                 else:
-                    stderr_output = process.stderr.read() if process.stderr else "Unknown error"
-                    self.log_message(f"Failed {input_path.name}: {stderr_output[:200]}", "error")
+                    error_output = '\n'.join(output_lines[-3:]) if output_lines else "Unknown error"
+                    self.log_message(f"Failed {input_path.name}: {error_output[:200]}", "error")
+                    logger.error(f"Failed to convert {input_path.name} (exit code {process.returncode}): {error_output[:200]}")
                     return False
                     
             except Exception as e:
@@ -1524,6 +1629,32 @@ class VideoConverter:
         except Exception as e:
             logger.error(f"Error backing up and deleting {original_path}: {e}")
             self.log_message(f"Error deleting original {original_path}: {str(e)}", "error")
+
+    def conversion_watchdog(self):
+        """Monitor conversion progress and detect deadlocks."""
+        try:
+            while self.is_converting and not self.shutdown_event.is_set():
+                time.sleep(60)  # Check every minute
+                
+                if self.last_conversion_activity:
+                    idle_time = time.time() - self.last_conversion_activity
+                    
+                    # If no activity for 10 minutes, consider it stuck
+                    if idle_time > 600:  # 10 minutes
+                        logger.error(f"Conversion appears stuck (no activity for {idle_time:.1f} seconds)")
+                        self.log_message("Conversion appears stuck - automatically cancelling", "error")
+                        
+                        # Force cancel the conversion
+                        self.is_converting = False
+                        
+                        # Update UI
+                        self.ui_queue.put(('status', 'Conversion cancelled - appeared stuck'))
+                        self.ui_queue.put(('conversion_done', {'successful': 0, 'failed': 0, 'skipped': 0}))
+                        
+                        break
+                        
+        except Exception as e:
+            logger.error(f"Error in conversion watchdog: {e}")
 
     def cancel_conversion(self):
         """Cancel conversion with proper cleanup."""
@@ -1668,14 +1799,28 @@ class VideoConverter:
             if isinstance(data, dict):
                 successful = data.get('successful', 0)
                 failed = data.get('failed', 0)
-                self.status_var.set(f"Conversion complete: {successful} successful, {failed} failed")
+                skipped = data.get('skipped', 0)
                 
+                status_parts = []
+                if successful > 0:
+                    status_parts.append(f"{successful} successful")
                 if failed > 0:
-                    messagebox.showwarning("Conversion Complete", 
-                                         f"Conversion finished with {failed} failures. Check logs for details.")
+                    status_parts.append(f"{failed} failed")
+                if skipped > 0:
+                    status_parts.append(f"{skipped} skipped")
+                
+                status_text = "Conversion complete: " + ", ".join(status_parts)
+                self.status_var.set(status_text)
+                
+                # Show appropriate message dialog
+                if failed > 0:
+                    message = f"Conversion finished:\n• {successful} successful\n• {failed} failed\n• {skipped} skipped\n\nCheck logs for failure details."
+                    messagebox.showwarning("Conversion Complete", message)
+                elif successful > 0:
+                    message = f"Conversion successful:\n• {successful} converted\n• {skipped} skipped (already exist)"
+                    messagebox.showinfo("Conversion Complete", message)
                 else:
-                    messagebox.showinfo("Conversion Complete", 
-                                      f"All {successful} videos converted successfully!")
+                    messagebox.showinfo("Conversion Complete", "All files were skipped (already exist)")
             else:
                 self.status_var.set("Conversion complete")
                 
