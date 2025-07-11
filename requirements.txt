@@ -2,6 +2,7 @@
 
 # Required Python packages
 tkinterdnd2>=0.3.0  # For drag and drop functionality
+psutil>=5.9.0       # For performance monitoring and memory management
 
 # Required system dependencies:
 # - FFmpeg (must be installed and added to system PATH)
@@ -20,8 +21,11 @@ tkinterdnd2>=0.3.0  # For drag and drop functionality
 # - re (for regular expressions)
 # - shutil (for file operations)
 # - webbrowser (for opening GitHub links)
+# - gc (for garbage collection)
+# - signal (for graceful shutdown)
+# - logging (for comprehensive logging)
+# - traceback (for error reporting)
 
 # Optional: If you want to add more advanced features later
 # Pillow>=10.1.0  # For image processing/thumbnails
 # tqdm>=4.66.1    # For progress bars in console mode
-# psutil>=5.9.0   # For detailed performance monitoring (CPU, memory usage)
