@@ -1,0 +1,17 @@
+# Video Converter for iPhone - Python Dependencies
+# 
+# Note: This script primarily uses built-in Python libraries
+# The main external dependency is FFmpeg (not a Python package)
+#
+# Built-in libraries used:
+# - tkinter (GUI framework)
+# - threading (for background processing)
+# - subprocess (for running FFmpeg)
+# - json (for parsing FFmpeg output)
+# - pathlib (for file path handling)
+# - queue (for thread communication)
+# - datetime (for timestamps)
+
+# Optional: If you want to add more advanced features later
+# Pillow==10.1.0  # For image processing/thumbnails
+# tqdm==4.66.1    # For progress bars in console mode 
