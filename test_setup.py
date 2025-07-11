@@ -37,6 +37,22 @@ def test_tkinter():
         print(f"✗ tkinter is not available: {e}")
         return False
 
+def test_tkinterdnd2():
+    """Test if tkinterdnd2 is available"""
+    print("Testing tkinterdnd2 availability...")
+    try:
+        from tkinterdnd2 import DND_FILES, TkinterDnD
+        # Try to create a simple window with TkinterDnD
+        root = TkinterDnD.Tk()
+        root.withdraw()  # Hide the window
+        root.destroy()
+        print("✓ tkinterdnd2 is available")
+        return True
+    except Exception as e:
+        print(f"✗ tkinterdnd2 is not available: {e}")
+        print("  Install it with: pip install tkinterdnd2")
+        return False
+
 def test_ffmpeg():
     """Test if FFmpeg is installed and accessible"""
     print("Testing FFmpeg installation...")
@@ -66,12 +82,21 @@ def test_ffmpeg():
 def test_required_modules():
     """Test if all required Python modules are available"""
     print("Testing required Python modules...")
-    
     required_modules = [
-        'threading', 'subprocess', 'json', 'pathlib', 
-        'datetime', 'queue', 'os', 'sys'
+        'tkinter',
+        'tkinterdnd2',
+        'subprocess',
+        'json',
+        'pathlib',
+        'os',
+        'queue',
+        'threading',
+        'configparser',
+        'shutil',
+        're',
+        'webbrowser',
+        'datetime'
     ]
-    
     missing_modules = []
     
     for module in required_modules:
@@ -125,8 +150,9 @@ def main():
     
     tests = [
         ("Python Version", test_python_version),
-        ("Tkinter GUI", test_tkinter),
-        ("FFmpeg Installation", test_ffmpeg),
+        ("Tkinter", test_tkinter),
+        ("TkinterDnD2", test_tkinterdnd2),
+        ("FFmpeg", test_ffmpeg),
         ("Required Modules", test_required_modules),
         ("File Permissions", test_file_permissions)
     ]

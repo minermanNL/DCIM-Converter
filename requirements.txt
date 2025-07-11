@@ -1,9 +1,13 @@
 # Video Converter for iPhone - Python Dependencies
-# 
-# Note: This script primarily uses built-in Python libraries
-# The main external dependency is FFmpeg (not a Python package)
-#
-# Built-in libraries used:
+
+# Required Python packages
+tkinterdnd2>=0.3.0  # For drag and drop functionality
+
+# Required system dependencies:
+# - FFmpeg (must be installed and added to system PATH)
+#   Download from: https://ffmpeg.org/download.html
+
+# Built-in Python libraries used:
 # - tkinter (GUI framework)
 # - threading (for background processing)
 # - subprocess (for running FFmpeg)
@@ -11,7 +15,13 @@
 # - pathlib (for file path handling)
 # - queue (for thread communication)
 # - datetime (for timestamps)
+# - configparser (for settings management)
+# - os (for file operations)
+# - re (for regular expressions)
+# - shutil (for file operations)
+# - webbrowser (for opening GitHub links)
 
 # Optional: If you want to add more advanced features later
-# Pillow==10.1.0  # For image processing/thumbnails
-# tqdm==4.66.1    # For progress bars in console mode 
+# Pillow>=10.1.0  # For image processing/thumbnails
+# tqdm>=4.66.1    # For progress bars in console mode
+# psutil>=5.9.0   # For detailed performance monitoring (CPU, memory usage)

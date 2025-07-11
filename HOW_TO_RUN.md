@@ -6,7 +6,17 @@
 - Download and install from [python.org](https://www.python.org/downloads/)
 - During installation, make sure to check "Add Python to PATH"
 
-### 2. FFmpeg
+### 2. Install Python Dependencies
+Open a command prompt/terminal and run:
+```bash
+pip install -r requirements.txt
+```
+
+This will install:
+- `tkinterdnd2` - For drag and drop functionality
+- Other required Python packages
+
+### 3. FFmpeg
 FFmpeg is required for video conversion. Install it based on your operating system:
 
 #### Windows
@@ -36,13 +46,26 @@ sudo apt install ffmpeg
 
 ## Installation
 
-1. Clone the repository:
+1. **Download the code**
+   - Option 1: Clone the repository (if using Git):
+     ```bash
+     git clone https://github.com/minermanNL/DCIM-Converter.git
+     cd DCIM-Converter
+     ```
+   - Option 2: Download and extract the ZIP file from GitHub
+
+2. **Install Dependencies**
    ```bash
-   git clone https://github.com/yourusername/dcim-video-optimizer.git
-   cd dcim-video-optimizer
+   pip install -r requirements.txt
    ```
 
-2. (Optional) Create and activate a virtual environment:
+3. **Verify Installation**
+   Run the test script to check if everything is set up correctly:
+   ```bash
+   python test_setup.py
+   ```
+
+4. (Optional) Create and activate a virtual environment:
    ```bash
    # Windows
    python -m venv venv
@@ -61,17 +84,25 @@ sudo apt install ffmpeg
 ## Running the Application
 
 ### Windows
-1. Double-click on `run_converter.bat`
-   OR
-   ```cmd
-   python video_converter.py
-   ```
+1. **Using Command Prompt/PowerShell**
+   - Navigate to the project directory
+   - Run: `python video_converter.py`
+
+2. **Using the Batch File** (Recommended for non-technical users)
+   - Double-click `run_converter.bat`
+   - This will automatically set up the environment and run the application
 
 ### macOS/Linux
-1. Make the script executable:
-   ```bash
-   chmod +x run_converter.sh
-   ```
+1. **Using Terminal**
+   - Navigate to the project directory
+   - Make the script executable:
+     ```bash
+     chmod +x run_converter.sh
+     ```
+   - Run the application:
+     ```bash
+     ./run_converter.sh
+     ```
 2. Run the application:
    ```bash
    ./run_converter.sh

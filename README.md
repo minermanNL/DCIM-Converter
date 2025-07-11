@@ -4,7 +4,8 @@ A Python GUI application that converts video files in your DCIM folder to iPhone
 
 ## Features
 
-- **GUI Interface**: Easy-to-use graphical interface built with tkinter
+- **GUI Interface**: Easy-to-use graphical interface built with tkinter and tkinterdnd2
+- **Drag and Drop**: Intuitive drag-and-drop support for folders
 - **Recursive Scanning**: Automatically finds all video files in folders and subfolders
 - **iPhone Compatibility**: Converts videos to H.264/AAC format optimized for iPhone
 - **Batch Processing**: Converts multiple videos automatically
@@ -18,7 +19,14 @@ A Python GUI application that converts video files in your DCIM folder to iPhone
 ### 1. Python 3.6 or higher
 Make sure Python is installed on your system. You can download it from [python.org](https://www.python.org/).
 
-### 2. FFmpeg Installation
+### 2. Install Python Dependencies
+Install the required Python packages using pip:
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. FFmpeg Installation
 FFmpeg is required for video conversion. Install it based on your operating system:
 
 #### Windows:
